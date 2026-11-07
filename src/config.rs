@@ -26,6 +26,7 @@ pub struct ZellijState {
     pub cache_mask: u8,
     pub focused_pane_id: Option<PaneId>,
     pub focused_pane_cwd: Option<std::path::PathBuf>,
+    pub tabs_max_width: Option<usize>,
 }
 
 #[derive(Clone, Debug, Ord, Eq, PartialEq, PartialOrd, Copy)]
@@ -88,6 +89,7 @@ pub struct ModuleConfig {
     pub border: BorderConfig,
     pub format_precedence: Vec<Part>,
     pub hide_on_overlength: bool,
+    pub tab_fit_width: bool,
 }
 
 impl ModuleConfig {
@@ -156,6 +158,11 @@ impl ModuleConfig {
             None => false,
         };
 
+        let tab_fit_width = match config.get("tab_fit_width") {
+            Some(opt) => opt == "true",
+            None => false,
+        };
+
         let border_config = parse_border_config(config).unwrap_or_default();
 
         Ok(Self {
@@ -174,12 +181,71 @@ impl ModuleConfig {
             border: border_config,
             format_precedence,
             hide_on_overlength,
+            tab_fit_width,
         })
+    }
+
+    /// Sets `tabs_max_width` to the space the part holding `{tabs}` can use
+    /// without overlapping the other parts.
+    fn fit_tabs(
+        &mut self,
+        state: &mut ZellijState,
+        widget_map: &BTreeMap<String, Arc<dyn Widget>>,
+    ) {
+        state.tabs_max_width = None;
+
+        if !self.tab_fit_width || state.cols == 0 {
+            return;
+        }
+
+        let tabs_widget = match widget_map.get("tabs") {
+            Some(widget) => widget,
+            None => return,
+        };
+
+        // The width of the other parts can change on any render, so the tabs
+        // are always computed again.
+        state.cache_mask |= UpdateEventMask::Tab as u8;
+
+        let left =
+            console::measure_text_width(&render_parts(&mut self.left_parts, widget_map, state));
+        let center =
+            console::measure_text_width(&render_parts(&mut self.center_parts, widget_map, state));
+        let right =
+            console::measure_text_width(&render_parts(&mut self.right_parts, widget_map, state));
+
+        let cols = state.cols;
+        let beside_center = (cols / 2).saturating_sub(center / 2);
+
+        let (part, available) = if self.left_parts_config.contains("{tabs}") {
+            let available = match center {
+                0 => cols.saturating_sub(right),
+                _ => beside_center,
+            };
+            (left, available)
+        } else if self.right_parts_config.contains("{tabs}") {
+            let available = match center {
+                0 => cols.saturating_sub(left),
+                _ => beside_center,
+            };
+            (right, available)
+        } else if self.center_parts_config.contains("{tabs}") {
+            (center, cols.saturating_sub(left + right))
+        } else {
+            return;
+        };
+
+        if part <= available {
+            return;
+        }
+
+        let tabs = console::measure_text_width(&tabs_widget.process("tabs", state));
+        state.tabs_max_width = Some(tabs.saturating_sub(part - available));
     }
 
     pub fn handle_mouse_action(
         &mut self,
-        state: ZellijState,
+        mut state: ZellijState,
         mouse: Mouse,
         widget_map: BTreeMap<String, Arc<dyn Widget>>,
     ) {
@@ -194,6 +260,8 @@ impl ModuleConfig {
             Mouse::Release(_, y) => y,
             Mouse::Hover(_, _) => return,
         };
+
+        self.fit_tabs(&mut state, &widget_map);
 
         let output_left = self.left_parts.iter_mut().fold("".to_owned(), |acc, part| {
             format!(
@@ -336,13 +404,15 @@ impl ModuleConfig {
 
     pub fn render_bar(
         &mut self,
-        state: ZellijState,
+        mut state: ZellijState,
         widget_map: BTreeMap<String, Arc<dyn Widget>>,
     ) -> String {
         if self.left_parts.is_empty() && self.center_parts.is_empty() && self.right_parts.is_empty()
         {
             return "No configuration found. See https://github.com/dj95/zjstatus/wiki/3-%E2%80%90-Configuration for more info".to_string();
         }
+
+        self.fit_tabs(&mut state, &widget_map);
 
         let output_left = self.left_parts.iter_mut().fold("".to_owned(), |acc, part| {
             format!(
@@ -517,6 +587,19 @@ impl ModuleConfig {
 
         self.format_space.format_string(&" ".repeat(space_count))
     }
+}
+
+fn render_parts(
+    parts: &mut [FormattedPart],
+    widget_map: &BTreeMap<String, Arc<dyn Widget>>,
+    state: &ZellijState,
+) -> String {
+    parts.iter_mut().fold("".to_owned(), |acc, part| {
+        format!(
+            "{acc}{}",
+            part.format_string_with_widgets(widget_map, state)
+        )
+    })
 }
 
 fn parts_from_config(
