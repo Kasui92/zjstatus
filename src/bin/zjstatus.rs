@@ -27,6 +27,8 @@ const REFRESH_INTERVAL_SECONDS: f64 = 1.0;
 struct State {
     pending_events: Vec<Event>,
     got_permissions: bool,
+    got_mode: bool,
+    got_tabs: bool,
     state: ZellijState,
     userspace_configuration: BTreeMap<String, String>,
     module_config: config::ModuleConfig,
@@ -95,6 +97,8 @@ impl ZellijPlugin for State {
         self.userspace_configuration = configuration;
         self.pending_events = Vec::new();
         self.got_permissions = false;
+        self.got_mode = false;
+        self.got_tabs = false;
         let uid = Uuid::new_v4();
 
         self.state = ZellijState {
@@ -143,12 +147,13 @@ impl ZellijPlugin for State {
         if let Event::PermissionRequestResult(PermissionStatus::Granted) = event {
             self.got_permissions = true;
 
-            while !self.pending_events.is_empty() {
+            let mut should_render = false;
+            for ev in std::mem::take(&mut self.pending_events) {
                 tracing::debug!("processing cached event");
-                let ev = self.pending_events.pop();
-
-                self.handle_event(ev.unwrap());
+                should_render |= self.handle_event(ev);
             }
+
+            return self.handle_event(event) || should_render;
         }
 
         if !self.got_permissions {
@@ -163,7 +168,9 @@ impl ZellijPlugin for State {
 
     #[tracing::instrument(skip_all)]
     fn render(&mut self, _rows: usize, cols: usize) {
-        if !self.got_permissions {
+        // Until the first ModeUpdate and TabUpdate the bar would show the default
+        // mode and no tabs.
+        if !self.got_permissions || !self.got_mode || !self.got_tabs {
             return;
         }
 
@@ -256,6 +263,7 @@ impl State {
 
                 self.state.mode = mode_info;
                 self.state.cache_mask = UpdateEventMask::Mode as u8;
+                self.got_mode = true;
 
                 should_render = true;
             }
@@ -374,6 +382,7 @@ impl State {
 
                 self.state.cache_mask = UpdateEventMask::Tab as u8;
                 self.state.tabs = tab_info;
+                self.got_tabs = true;
 
                 should_render = true;
             }
