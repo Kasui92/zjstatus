@@ -198,7 +198,7 @@ impl Widget for TabsWidget {
                 let mut content = f.content.clone();
 
                 if content.contains("{count}") {
-                    content = content.replace("{count}", (truncated_end).to_string().as_str());
+                    content = content.replace("{count}", (truncated_start).to_string().as_str());
                 }
 
                 offset += console::measure_text_width(&f.format_string(&content));
