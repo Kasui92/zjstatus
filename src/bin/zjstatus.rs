@@ -127,6 +127,7 @@ impl ZellijPlugin for State {
             incoming_notification: None,
             focused_pane_id: None,
             focused_pane_cwd: None,
+            tabs_max_width: None,
         };
     }
 

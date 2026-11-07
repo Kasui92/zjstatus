@@ -135,8 +135,7 @@ impl Widget for TabsWidget {
         let mut output = "".to_owned();
         let mut counter = 0;
 
-        let (truncated_start, truncated_end, tabs) =
-            get_tab_window(&state.tabs, self.tab_display_count);
+        let (truncated_start, truncated_end, tabs) = self.tab_window(state);
 
         if truncated_start > 0 {
             for f in &self.tab_truncate_start_format {
@@ -182,8 +181,7 @@ impl Widget for TabsWidget {
         let mut offset = 0;
         let mut counter = 0;
 
-        let (truncated_start, truncated_end, tabs) =
-            get_tab_window(&state.tabs, self.tab_display_count);
+        let (truncated_start, truncated_end, tabs) = self.tab_window(state);
 
         let active_pos = &state
             .tabs
@@ -251,6 +249,71 @@ impl Widget for TabsWidget {
 }
 
 impl TabsWidget {
+    fn tab_window(&self, state: &ZellijState) -> (usize, usize, Vec<TabInfo>) {
+        match state.tabs_max_width {
+            Some(max_width) => self.fit_tab_window(state, max_width),
+            None => get_tab_window(&state.tabs, self.tab_display_count),
+        }
+    }
+
+    /// Widens the window around the active tab, one tab per side at a time,
+    /// while the tabs, separators and truncation indicators fit in `max_width`.
+    fn fit_tab_window(
+        &self,
+        state: &ZellijState,
+        max_width: usize,
+    ) -> (usize, usize, Vec<TabInfo>) {
+        let tabs = &state.tabs;
+
+        let active = match tabs.iter().position(|t| t.active) {
+            Some(index) => index,
+            None => return (0, 0, tabs.to_vec()),
+        };
+
+        let widths: Vec<usize> = tabs
+            .iter()
+            .map(|t| console::measure_text_width(&self.render_tab(t, &state.panes, &state.mode)))
+            .collect();
+
+        let separator = self.separator.as_ref().map_or(0, |s| {
+            console::measure_text_width(&s.format_string(&s.content))
+        });
+
+        let max_count = self.tab_display_count.unwrap_or(usize::MAX);
+
+        let fits = |first: usize, last: usize| {
+            let tabs_width =
+                widths[first..=last].iter().sum::<usize>() + separator * (last - first);
+
+            tabs_width
+                + truncation_width(&self.tab_truncate_start_format, first)
+                + truncation_width(&self.tab_truncate_end_format, tabs.len() - 1 - last)
+                <= max_width
+        };
+
+        let (mut first, mut last) = (active, active);
+
+        loop {
+            let mut grown = false;
+
+            if last - first + 1 < max_count && last + 1 < tabs.len() && fits(first, last + 1) {
+                last += 1;
+                grown = true;
+            }
+
+            if last - first + 1 < max_count && first > 0 && fits(first - 1, last) {
+                first -= 1;
+                grown = true;
+            }
+
+            if !grown {
+                break;
+            }
+        }
+
+        (first, tabs.len() - 1 - last, tabs[first..=last].to_vec())
+    }
+
     fn select_format(&self, info: &TabInfo, mode: &ModeInfo) -> &Vec<FormattedPart> {
         if info.active && mode.mode == InputMode::RenameTab {
             return &self.rename_tab_format;
@@ -418,6 +481,20 @@ impl TabsWidget {
     }
 }
 
+fn truncation_width(format: &[FormattedPart], count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+
+    format
+        .iter()
+        .map(|f| {
+            let content = f.content.replace("{count}", count.to_string().as_str());
+            console::measure_text_width(&f.format_string(&content))
+        })
+        .sum()
+}
+
 pub fn get_tab_window(
     tabs: &Vec<TabInfo>,
     max_count: Option<usize>,
@@ -460,10 +537,63 @@ pub fn get_tab_window(
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeMap;
+
     use zellij_tile::prelude::TabInfo;
 
-    use super::get_tab_window;
+    use super::{TabsWidget, get_tab_window};
+    use crate::config::ZellijState;
     use rstest::rstest;
+
+    fn fit_state(count: usize, active: usize, max_width: usize) -> ZellijState {
+        ZellijState {
+            tabs: (0..count)
+                .map(|i| TabInfo {
+                    active: i == active,
+                    name: i.to_string(),
+                    position: i,
+                    ..TabInfo::default()
+                })
+                .collect(),
+            tabs_max_width: Some(max_width),
+            ..ZellijState::default()
+        }
+    }
+
+    // Each tab renders as "(n)" (3 cols) and each indicator as "<n" or "n>" (2 cols).
+    #[rstest]
+    #[case(fit_state(5, 2, 100), (0, 0, vec!["0", "1", "2", "3", "4"]))]
+    #[case(fit_state(5, 2, 13), (1, 1, vec!["1", "2", "3"]))]
+    #[case(fit_state(5, 2, 11), (2, 0, vec!["2", "3", "4"]))]
+    #[case(fit_state(5, 0, 11), (0, 2, vec!["0", "1", "2"]))]
+    #[case(fit_state(5, 4, 11), (2, 0, vec!["2", "3", "4"]))]
+    #[case(fit_state(5, 2, 1), (2, 2, vec!["2"]))]
+    fn test_fit_tab_window(
+        #[case] state: ZellijState,
+        #[case] expected: (usize, usize, Vec<&str>),
+    ) {
+        let config = BTreeMap::from([
+            ("tab_normal".to_owned(), "({name})".to_owned()),
+            (
+                "tab_truncate_start_format".to_owned(),
+                "<{count}".to_owned(),
+            ),
+            ("tab_truncate_end_format".to_owned(), "{count}>".to_owned()),
+        ]);
+        let widget = TabsWidget::new(&config);
+
+        let (start, end, tabs) = widget.tab_window(&state);
+        let names: Vec<String> = tabs.iter().map(|t| t.name.clone()).collect();
+
+        assert_eq!(
+            (start, end, names),
+            (
+                expected.0,
+                expected.1,
+                expected.2.iter().map(|n| n.to_string()).collect()
+            )
+        );
+    }
 
     #[rstest]
     #[case(
