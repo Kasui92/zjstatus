@@ -71,20 +71,32 @@ impl ZellijPlugin for State {
             PermissionType::RunCommands,
         ]);
 
-        subscribe(&[
+        let module_config = ModuleConfig::new(&configuration);
+
+        let mut events = vec![
             EventType::Mouse,
             EventType::ModeUpdate,
             EventType::PaneUpdate,
             EventType::PermissionRequestResult,
             EventType::Timer,
             EventType::TabUpdate,
-            EventType::SessionUpdate,
             EventType::RunCommandResult,
             EventType::CwdChanged,
-        ]);
+        ];
+
+        // SessionUpdate is only used to hide pane frames. It is broadcast to every
+        // instance in every session, so skip it when frame hiding is off.
+        if module_config
+            .as_ref()
+            .map_or(true, |mc| !frame_config(mc).is_disabled())
+        {
+            events.push(EventType::SessionUpdate);
+        }
+
+        subscribe(&events);
         set_timeout(REFRESH_INTERVAL_SECONDS);
 
-        self.module_config = match ModuleConfig::new(&configuration) {
+        self.module_config = match module_config {
             Ok(mc) => mc,
             Err(e) => {
                 self.err = Some(e);
@@ -272,13 +284,7 @@ impl State {
                 tracing::debug!(pane_count = ?pane_info.panes.len());
 
                 frames::hide_frames_conditionally(
-                    &frames::FrameConfig::new(
-                        self.module_config.hide_frame_for_single_pane,
-                        self.module_config.hide_frame_except_for_search,
-                        self.module_config.hide_frame_except_for_fullscreen,
-                        self.module_config.hide_frame_except_for_scroll,
-                        &self.module_config.pane_frame_style,
-                    ),
+                    &frame_config(&self.module_config),
                     &self.state.tabs,
                     &pane_info,
                     &self.state.mode,
@@ -356,13 +362,7 @@ impl State {
 
                 if let Some(current_session) = current_session {
                     frames::hide_frames_conditionally(
-                        &frames::FrameConfig::new(
-                            self.module_config.hide_frame_for_single_pane,
-                            self.module_config.hide_frame_except_for_search,
-                            self.module_config.hide_frame_except_for_fullscreen,
-                            self.module_config.hide_frame_except_for_scroll,
-                            &self.module_config.pane_frame_style,
-                        ),
+                        &frame_config(&self.module_config),
                         &current_session.tabs,
                         &current_session.panes,
                         &self.state.mode,
@@ -397,6 +397,16 @@ impl State {
         };
         should_render
     }
+}
+
+fn frame_config(mc: &ModuleConfig) -> frames::FrameConfig {
+    frames::FrameConfig::new(
+        mc.hide_frame_for_single_pane,
+        mc.hide_frame_except_for_search,
+        mc.hide_frame_except_for_fullscreen,
+        mc.hide_frame_except_for_scroll,
+        &mc.pane_frame_style,
+    )
 }
 
 fn register_widgets(configuration: &BTreeMap<String, String>) -> BTreeMap<String, Arc<dyn Widget>> {
